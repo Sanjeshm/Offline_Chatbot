@@ -1,0 +1,11 @@
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# Ignore downloaded models
+backend/models/
+
+# Ignore IDE/editor folders
+.vscode/
+.idea/
