@@ -1,3 +1,4 @@
+# Offline_Chatbot
 # 🤖 Offline RAG Chatbot
 
     An advanced, fully offline Retrieval-Augmented Generation (RAG) chatbot that answers queries using only the content from your PDF and Word documents. Designed for privacy, speed, and accuracy—no external APIs required.
