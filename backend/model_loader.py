@@ -95,15 +95,19 @@ class LLMLoader:
     def load_model(self, model_name: str = "tinyllama") -> bool:
         """Load a quantized GGUF model for inference"""
         try:
-            if not self.download_model(model_name):
-                # If download fails, check if the file exists anyway (e.g., manual download)
-                model_info = self.model_urls.get(model_name)
-                if not model_info or not (self.models_dir / model_info["filename"]).exists():
-                    logger.error(f"Model '{model_name}' is not available.")
-                    return False
-            
-            model_path = self.model_path # path is set by download_model
+            # First, ensure the model file exists locally. This relies on the user
+            # having downloaded it beforehand as per the README instructions.
+            model_info = self.model_urls.get(model_name)
+            if not model_info:
+                logger.error(f"Model '{model_name}' is not defined in the application.")
+                return False
 
+            model_path = self.models_dir / model_info["filename"]
+            if not model_path.exists():
+                logger.error(f"Model file not found at {model_path}. Please download it first.")
+                return False
+            
+            self.model_path = model_path
             logger.info(f"Loading model: {model_name} from {model_path}")
 
             # Offload all layers to GPU if possible, suitable for smaller models on low-VRAM GPUs
@@ -179,30 +183,21 @@ class LLMLoader:
                 "metadata": None
             }
 
-    def _format_rag_prompt(self, user_query: str, context: str = None) -> str:
-        """Format the prompt for RAG with retrieved context"""
-        # Using TinyLlama chat template
-        if context:
-            return f"""<|im_start|>system
-You are a helpful assistant that answers questions using only the provided context. If the answer is not in the context, say you don't know. Provide the source filename and page number.
-<|im_end|>
-<|im_start|>user
-Context:
+    def _format_rag_prompt(self, user_query: str, context: str) -> str:
+        """Format the prompt for RAG with retrieved context using the correct TinyLlama chat template."""
+        system_prompt = "You are a helpful assistant that answers questions using only the provided context. If the answer is not in the context, say 'I could not find the answer in the documents.' and do not provide any other information."
+        
+        user_message = f"""Context:
 {context}
 
-Question: {user_query}<|im_end|>
-<|im_start|>assistant
-"""
-        else:
-            return f"""<|im_start|>system
-You are a helpful assistant.
-<|im_end|>
+Question: {user_query}"""
+
+        return f"""<|im_start|>system
+{system_prompt}<|im_end|>
 <|im_start|>user
-{user_query}<|im_end|>
+{user_message}<|im_end|>
 <|im_start|>assistant
 """
-
-
 
     def get_model_info(self) -> Dict:
         """Get information about the currently loaded model"""
@@ -253,9 +248,24 @@ class RAGWithLLM:
         # Step 1: Retrieve relevant context
         rag_result = self.rag_pipeline.query(question)
         
-        # Step 2: Generate answer using LLM
+        # **CRITICAL FIX V3**: Use a much stricter similarity threshold.
+        SIMILARITY_THRESHOLD = 0.55
+        context = rag_result.get("retrieved_chunk")
+        similarity_score = rag_result.get("similarity_score", 0.0)
+
+        if not context or similarity_score < SIMILARITY_THRESHOLD:
+            return {
+                "question": question,
+                "answer": "I could not find the answer in the documents.",
+                "source": None,
+                "similarity_score": similarity_score, # Return the low score for debugging
+                "llm_used": False,
+                "llm_metadata": None,
+                "processing_time": rag_result.get("processing_time")
+            }
+
+        # Step 2: Generate answer using LLM only if context is relevant
         if self.model_loaded:
-            context = rag_result.get("retrieved_chunk")
             rag_prompt = self.llm_loader._format_rag_prompt(question, context)
             llm_response = self.llm_loader.generate_response(rag_prompt)
             
@@ -268,18 +278,18 @@ class RAGWithLLM:
                 "question": question,
                 "answer": answer,
                 "source": rag_result.get("source"),
-                "similarity_score": rag_result.get("similarity_score"),
+                "similarity_score": similarity_score,
                 "llm_used": True,
                 "llm_metadata": llm_response.get("metadata"),
                 "processing_time": rag_result.get("processing_time")
             }
         else:
-            # Fallback to just returning the retrieved chunk
+            # Fallback if LLM is not loaded
             return {
                 "question": question,
                 "answer": f"LLM not loaded. Retrieved context: {rag_result.get('retrieved_chunk')}",
                 "source": rag_result.get("source"),
-                "similarity_score": rag_result.get("similarity_score"),
+                "similarity_score": similarity_score,
                 "llm_used": False
             }
 
@@ -291,3 +301,4 @@ class RAGWithLLM:
             "gpu_info": self.llm_loader.check_gpu_availability(),
             "system_ready": self.model_loaded
         }
+#commited

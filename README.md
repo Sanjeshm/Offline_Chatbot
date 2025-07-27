@@ -310,6 +310,18 @@ The application provides real-time monitoring of:
    # Configure in rag_pipeline.py
    ```
 
+## Use of AI Assistance in Development
+  In line with modern development practices, AI-powered tools were utilized as a productivity enhancer and a collaborative partner throughout this project. This section details how these tools were leveraged.
+
+
+**Specific Use Cases in This Project**
+
+➡️Boilerplate Code Generation: The initial class structures for DocumentProcessor, EmbeddingEngine,  and LLMLoader were scaffolded with the help of an AI assistant. This included generating function signatures, docstrings, and basic exception handling blocks.
+
+➡️Streamlit UI Styling: The CSS used to style the Streamlit front-end was developed iteratively with an AI. I provided high-level design prompts (e.g., "Create a professional dark theme with blue accents"), and the AI generated the CSS code, which I then manually refined to match the desired layout and interactivity.
+
+➡️Debugging and Error Resolution: During development, I encountered several bugs, including issues with Qdrant's in-memory instance and Streamlit's refresh cycle. I provided the AI with the error messages and relevant code snippets, and it helped identify the root causes and suggest potential solutions, such as the st.rerun() fix.
+
 ## Security & Privacy
 
 - **No External Calls**: All processing happens locally
