@@ -13,6 +13,10 @@ import time
 import numpy as np
 import torch
 
+# --- Qdrant Integration ---
+from qdrant_client import QdrantClient, models
+from qdrant_client.http.models import UpdateStatus
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -175,72 +179,96 @@ class EmbeddingEngine:
 
 
 class VectorStore:
-    """Simple in-memory vector store with cosine similarity search"""
+    """Vector store implementation using Qdrant"""
     
-    def __init__(self):
-        self.chunks: List[DocumentChunk] = []
-        self._embeddings_matrix: Optional[np.ndarray] = None
+    def __init__(self, embedding_dim: int):
+        self.collection_name = "rag_chatbot_collection"
+        # Use an in-memory Qdrant instance for local, offline operation
+        self.client = QdrantClient(":memory:")
+        
+        # Create the collection if it doesn't exist
+        try:
+            self.client.get_collection(collection_name=self.collection_name)
+            logger.info(f"Collection '{self.collection_name}' already exists.")
+        except Exception:
+            logger.info(f"Creating collection '{self.collection_name}'.")
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=models.VectorParams(size=embedding_dim, distance=models.Distance.COSINE),
+            )
 
     def add_chunks(self, chunks: List[DocumentChunk]):
-        """Add chunks to the vector store"""
-        new_embeddings = [chunk.embedding for chunk in chunks if chunk.embedding is not None]
-        if not new_embeddings:
-            logger.warning("No chunks with embeddings provided to add.")
-            return
-
-        new_embeddings_np = np.array(new_embeddings, dtype=np.float32)
-
-        if self._embeddings_matrix is None:
-            self._embeddings_matrix = new_embeddings_np
-        else:
-            self._embeddings_matrix = np.vstack([self._embeddings_matrix, new_embeddings_np])
+        """Add chunks to the Qdrant collection"""
+        points = []
+        for chunk in chunks:
+            if chunk.embedding is not None:
+                points.append(
+                    models.PointStruct(
+                        id=chunk.chunk_id,
+                        vector=chunk.embedding.tolist(),
+                        payload={
+                            "filename": chunk.filename,
+                            "page_number": chunk.page_number,
+                            "text_content": chunk.text_content
+                        }
+                    )
+                )
         
-        self.chunks.extend(chunks)
-        logger.info(f"Added {len(chunks)} chunks. Total in store: {len(self.chunks)}")
+        if points:
+            op_info = self.client.upsert(
+                collection_name=self.collection_name,
+                points=points,
+                wait=True
+            )
+            if op_info.status == UpdateStatus.COMPLETED:
+                logger.info(f"Upserted {len(points)} points to Qdrant successfully.")
+            else:
+                logger.error(f"Qdrant upsert failed with status: {op_info.status}")
 
-    def _cosine_similarity_matrix(self, query_embedding: np.ndarray) -> np.ndarray:
-        """Calculate cosine similarity using matrix operations for speed."""
-        query_norm = np.linalg.norm(query_embedding)
-        matrix_norm = np.linalg.norm(self._embeddings_matrix, axis=1)
-        
-        # Dot product
-        dot_product = np.dot(self._embeddings_matrix, query_embedding)
-        
-        # Cosine similarity
-        similarities = dot_product / (matrix_norm * query_norm)
-        return similarities
 
     def search(self, query_embedding: np.ndarray, top_k: int = 1) -> List[Tuple[DocumentChunk, float]]:
-        """Search for most similar chunks (returns exactly top_k results)"""
-        if self._embeddings_matrix is None or len(self.chunks) == 0:
-            return []
+        """Search for most similar chunks in Qdrant"""
+        search_result = self.client.search(
+            collection_name=self.collection_name,
+            query_vector=query_embedding.tolist(),
+            limit=top_k,
+            with_payload=True
+        )
         
-        # Normalize query embedding
-        query_embedding_norm = query_embedding / np.linalg.norm(query_embedding)
-
-        # Normalize the embeddings matrix
-        embeddings_matrix_norm = self._embeddings_matrix / np.linalg.norm(self._embeddings_matrix, axis=1, keepdims=True)
-
-        # Compute cosine similarities
-        similarities = np.dot(embeddings_matrix_norm, query_embedding_norm)
-        
-        # Get top_k indices. Using argpartition for efficiency.
-        # It finds the k-th largest value's index without sorting the whole array.
-        # We get the indices of the top_k largest values.
-        top_k_indices = np.argpartition(similarities, -top_k)[-top_k:]
-        
-        # Sort only the top_k results
-        results = sorted([(self.chunks[i], similarities[i]) for i in top_k_indices], key=lambda x: x[1], reverse=True)
-        
+        results = []
+        for hit in search_result:
+            payload = hit.payload
+            chunk = DocumentChunk(
+                chunk_id=hit.id,
+                filename=payload["filename"],
+                page_number=payload["page_number"],
+                text_content=payload["text_content"]
+            )
+            results.append((chunk, hit.score))
+            
         return results
 
     def get_stats(self) -> Dict:
-        """Get vector store statistics"""
-        return {
-            "total_chunks": len(self.chunks),
-            "unique_documents": len(set(chunk.filename for chunk in self.chunks)),
-            "dimension": self._embeddings_matrix.shape[1] if self._embeddings_matrix is not None else 0
-        }
+        """Get vector store statistics from Qdrant"""
+        try:
+            # Explicitly refresh collection info to get the latest count and config
+            collection_info = self.client.get_collection(collection_name=self.collection_name)
+            
+            # **FIX**: Correctly access the vector parameters from the config object
+            # The structure is collection_info.config.params.vectors
+            vectors_config = collection_info.config.params.vectors
+            dimension = vectors_config.size
+
+            return {
+                "total_chunks": collection_info.points_count,
+                "dimension": dimension
+            }
+        except Exception as e:
+            logger.error(f"Error getting Qdrant stats: {e}")
+            return {
+                "total_chunks": 0,
+                "dimension": 0
+            }
 
 
 class RAGPipeline:
@@ -249,7 +277,8 @@ class RAGPipeline:
     def __init__(self):
         self.doc_processor = DocumentProcessor()
         self.embedding_engine = EmbeddingEngine()
-        self.vector_store = VectorStore()
+        # Initialize VectorStore with the correct embedding dimension
+        self.vector_store = VectorStore(embedding_dim=self.embedding_engine.get_embedding_dimension())
         self.documents_processed = 0
 
     def process_and_store_document(self, file_path: str) -> Dict:
@@ -319,3 +348,4 @@ class RAGPipeline:
             "embedding_model": self.embedding_engine.model_name,
             "embedding_dimension": self.embedding_engine.get_embedding_dimension()
         }
+#commited
